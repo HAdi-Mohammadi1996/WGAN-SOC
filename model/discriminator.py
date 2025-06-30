@@ -52,7 +52,7 @@ class Discriminator(torch.nn.Module):
             SNConv(ndf*8, ndf*16, kernel_size=3, stride=1, padding=1),
             torch.nn.LeakyReLU(0.1, inplace=True),
         )
-        self.fc1 = SNDense(ndf*16, 1, cube_size)
+        self.fc1 = SNDense(ndf*16, 1, cube_size)   
 
     def forward(self, x):
         x = self.main(x)
