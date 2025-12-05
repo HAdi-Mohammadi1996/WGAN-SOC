@@ -4,7 +4,7 @@ from PIL import Image
 import numpy as np
 from pathlib import Path
 import torchvision.transforms as T
-from typing import List, Tuple, Optional, Union, Callable
+from typing import List, Tuple, Optional, Union, Callable   # NOTE: Do we need to add bool as well? since we have a bool parameter in the class
 
 class TiffVolumeDataset(Dataset):
     def __init__(
@@ -148,6 +148,13 @@ class NormalizeVolume:
     def __init__(self, min_val=None, max_val=None):
         self.min_val = min_val
         self.max_val = max_val
+        
+        '''
+        If min_val and max_val are provided, normalization will use those values.
+        This is useful when we want to normalize between [-1, 1] for tanh activation.
+        If not provided, it will compute min and max from the volume data. This would
+        be normalization between [0, 1] for sigmoid activation.
+        '''
     
     def __call__(self, volume):
         if self.min_val is None or self.max_val is None:
