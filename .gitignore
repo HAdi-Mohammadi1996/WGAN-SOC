@@ -18,3 +18,6 @@ Thumbs.db
 # Any folder named "data" or "output"
 data/
 output/
+
+# Any file with the scratch prefix
+scratch_*
