@@ -17,7 +17,7 @@ from .data_pipeline import (
 
 __all__ = [
     # Preprocessing
-    # "batch",
+    "batch",
     # Data loading
     "load_mat_volume",
     "extract_subvolumes",

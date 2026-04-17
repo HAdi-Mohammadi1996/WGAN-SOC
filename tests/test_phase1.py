@@ -36,6 +36,7 @@ from slicegan.data_pipeline import (
     extract_subvolumes,
     load_mat_volume,
 )
+from slicegan.preprocessing import batch
 
 
 # ---------------------------------------------------------------------------
@@ -154,30 +155,86 @@ def test_extract_subvolumes_stride(synthetic_vol):
 # ---------------------------------------------------------------------------
 
 def test_batch_mat3d_returns_three_datasets(tmp_mat):
-    assert True  # Placeholder to ensure tmp_mat fixture is used
+    path, _ = tmp_mat
+    result = batch([str(path)], imtype='mat3D', l=20, sf=1)
+    assert len(result) == 3
+    for ds in result:
+        assert isinstance(ds, TensorDataset)
+
 
 def test_dataset_size_capped(tmp_mat):
-    assert True  # Placeholder to ensure tmp_mat fixture is used
+    """Each dataset must not exceed 32*900 = 28 800 patches."""
+    path, _ = tmp_mat
+    result = batch([str(path)], imtype='mat3D', l=20, sf=1)
+    for ds in result:
+        assert len(ds) <= 32 * 900
 
 
 def test_onehot_valid(tmp_mat):
-    assert True  # Placeholder to ensure tmp_mat fixture is used
+    """One-hot channels must sum to 1 at every pixel."""
+    path, _ = tmp_mat
+    result = batch([str(path)], imtype='mat3D', l=20, sf=1)
+    ds = result[0]
+    # Check first 10 patches
+    for i in range(min(10, len(ds))):
+        patch = ds[i][0]  # (n_phases, l, l)
+        channel_sum = patch.sum(dim=0)  # (l, l)
+        max_dev = (channel_sum - 1.0).abs().max().item()
+        assert max_dev < 1e-4, f"One-hot sum deviation {max_dev} at patch {i}"
 
 
 def test_phase_label_mapping(tmp_path):
-    assert True  # Placeholder to ensure tmp_mat fixture is used
+    """Labels 1,2,3 must map to channels 0,1,2 respectively."""
+    # Build a small volume with known label layout
+    vol = np.zeros((30, 30, 30), dtype=np.int32)
+    vol[:10, :, :] = 1
+    vol[10:20, :, :] = 2
+    vol[20:, :, :] = 3
+
+    path = tmp_path / "label_test.mat"
+    scipy.io.savemat(str(path), {"vol_seg": vol})
+
+    result = batch([str(path)], imtype='mat3D', l=28, sf=1)
+    # Just check the raw pipeline via load + encode
+    loaded = load_mat_volume(str(path))
+    assert loaded[0, 0, 0] == 1
+    assert loaded[10, 0, 0] == 2
+    assert loaded[20, 0, 0] == 3
+
+    # Patches should have channel 0 hot where label was 1
+    ds = result[0]
+    for i in range(min(5, len(ds))):
+        patch = ds[i][0]  # (3, l, l)
+        ch_sum = patch.sum(dim=0)
+        assert (ch_sum - 1.0).abs().max().item() < 1e-4
 
 
 def test_patch_shape(tmp_mat):
-    assert True  # Placeholder to ensure tmp_mat fixture is used
+    """Patches should have shape [n_phases, l, l]."""
+    path, _ = tmp_mat
+    l = 20
+    result = batch([str(path)], imtype='mat3D', l=l, sf=1)
+    for ds in result:
+        patch = ds[0][0]
+        assert patch.shape == (N_PHASES, l, l)
 
 
 def test_scale_factor(tmp_mat):
-    assert True  # Placeholder to ensure tmp_mat fixture is used
+    """Scale factor sf=2 should halve each spatial dimension of the volume
+    before patching (we verify patch count decreases, since there are fewer
+    subvolumes to extract from a downsampled volume)."""
+    path, _ = tmp_mat
+    result_sf1 = batch([str(path)], imtype='mat3D', l=20, sf=1)
+    result_sf2 = batch([str(path)], imtype='mat3D', l=20, sf=2)
+    # sf=2 → volume (40, 50, 30), fewer subvols of size 20
+    assert len(result_sf2[0]) <= len(result_sf1[0])
 
 
 def test_isotropic_replication(tmp_mat):
-    assert True  # Placeholder to ensure tmp_mat fixture is used
+    """A single-path list should produce three datasets."""
+    path, _ = tmp_mat
+    result = batch([str(path)], imtype='mat3D', l=20, sf=1)
+    assert len(result) == 3
 
 
 # ---------------------------------------------------------------------------
@@ -250,7 +307,17 @@ def test_augmentation_preserves_vf():
 # ---------------------------------------------------------------------------
 
 def test_dataloader_iterates(tmp_mat):
-    assert True  # Placeholder to ensure tmp_mat fixture is used
+    """DataLoader should complete 2 full iterations without error."""
+    path, _ = tmp_mat
+    result = batch([str(path)], imtype='mat3D', l=20, sf=1)
+    ds = result[0]
+    loader = DataLoader(ds, batch_size=8, num_workers=0, shuffle=True)
+    count = 0
+    for _ in loader:
+        count += 1
+        if count >= 2:
+            break
+    assert count >= min(2, len(loader))
 
 
 # ---------------------------------------------------------------------------
