@@ -26,6 +26,12 @@ import pytest
 import scipy.io
 import torch
 from torch.utils.data import DataLoader, TensorDataset
+from morphology import compute_cld
+from morphology import compute_volume_fraction as vf_calc
+
+# A = load_mat("datasets/test_dataset/86.mat")
+# mean_cld, _   = compute_cld(A, {1:'Ni', 2:'YSZ', 3:'Pore'}, voxel_size_um=0.1)
+# print(f"Mean CLD: {mean_cld}")
 
 from slicegan.data_pipeline import (
     augment_volume,
@@ -255,6 +261,19 @@ def test_volume_fraction_sums_to_one():
     vf = compute_volume_fraction(t)
     assert abs(vf.sum().item() - 1.0) < 1e-4
 
+# ---------------------------------------------------------------------------
+# compute_volume_fraction_Hadi
+# ---------------------------------------------------------------------------
+
+def test_vf_calc():
+    """VF per phase must sum to 1.0 within 1e-4."""
+    vol = _make_synthetic_vol(shape=(30, 30, 30))
+    phases = np.unique(vol)
+    phase_labels = dict(zip(phases, ['Phase1', 'Phase2', 'Phase3']))
+    vf = vf_calc(vol, phase_labels)
+    vf = np.array(list(vf.values()))
+    assert abs(vf.sum().item() - 1.0) < 1e-4
+
 
 # ---------------------------------------------------------------------------
 # compute_average_pore_size
@@ -264,10 +283,15 @@ def test_pore_size_positive():
     """Average pore size must be > 0 for all phases present in the volume."""
     vol = _make_synthetic_vol(shape=(30, 30, 30))
     phases = np.unique(vol)
-    for ph in phases:
-        mask = (vol == ph).astype(np.uint8)
-        ps = compute_average_pore_size(mask)
-        assert ps > 0.0, f"Pore size should be positive for phase {ph}"
+    phase_labels = dict(zip(phases, ['Phase1', 'Phase2', 'Phase3']))
+    cld_mean, _ = compute_cld(vol, phase_labels, voxel_size_um=0.1)
+    cld_mean = np.array(list(cld_mean.values()))
+    assert all(ps > 0.0 for ps in cld_mean), f"All CLD means should be positive, got {cld_mean}"
+    # print(f"Mean CLD: {cld_mean}")
+    # for ph in phases:
+    #     mask = (vol == ph).astype(np.uint8)
+    #     ps = compute_average_pore_size(mask)
+    #     assert ps > 0.0, f"Pore size should be positive for phase {ph}"
 
 
 # ---------------------------------------------------------------------------
