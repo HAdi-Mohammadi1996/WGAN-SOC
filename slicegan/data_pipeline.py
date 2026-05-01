@@ -9,6 +9,8 @@ import numpy as np
 import scipy.io
 import scipy.ndimage
 import torch
+from morphology import compute_volume_fraction as compute_vf
+from morphology import compute_cld
 
 # ---------------------------------------------------------------------------
 # MAT file loading
@@ -186,19 +188,14 @@ def compute_conditioning_vector(volume: torch.Tensor, n_phases: int) -> torch.Te
         labels = np.vectorize(label_to_idx.get)(volume)
         unique_phases = list(range(n_phases))
         onehot = None
-
-    total = labels.size
-    vf_list = []
-    ps_list = []
-
-    for ph_idx in range(n_phases):
-        mask = (labels == ph_idx)
-        vf = mask.sum() / total
-        vf_list.append(vf)
-        ps = compute_average_pore_size(mask.astype(np.uint8))
-        ps_list.append(ps)
-
-    return torch.tensor(vf_list + ps_list, dtype=torch.float32)
+    
+    phase_labels = dict(zip(unique_phases, range(n_phases)))  
+    vf = compute_vf(labels, phase_labels)
+    ps, _ = compute_cld(labels, phase_labels, voxel_size_um=0.1, px_min=1.0)
+    vf = list(vf.values())
+    ps = list(ps.values())
+    
+    return torch.tensor(vf + ps, dtype=torch.float32)
 
 
 def compute_dataset_conditioning_stats(dataset_xyz: list, n_phases: int, max_samples: int = 500) -> tuple:
