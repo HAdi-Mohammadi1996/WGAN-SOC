@@ -1,3 +1,25 @@
-datasets/
+# Python-generated files
 __pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+.ipynb_checkpoints/
+
+# Virtual environments
+.venv
+
+.vscode/
+.idea/
 .DS_Store
+Thumbs.db
+
+# Any folder named "data" or "output"
+data/
+output/
+
+# Any file with the scratch prefix
+scratch_*
+
+datasets/
