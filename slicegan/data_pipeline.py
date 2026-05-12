@@ -128,27 +128,204 @@ def compute_volume_fraction(volume: torch.Tensor) -> torch.Tensor:
     vf = volume.reshape(n_phases, -1).sum(dim=1).float() / total
     return vf
 
+def compute_average_pore_size(volume: np.ndarray, voxel_size: float = 1.0,
+    phases: list[int] | None = None, n_lines: int = 500_000,
+    px_min_mean: float = 4.0, seed: int | None = 42,) -> np.ndarray:
 
-def compute_average_pore_size(binary_mask: np.ndarray) -> float:
-    """Compute mean distance-transform value inside a binary phase mask.
+    """Mean chord length per phase via isotropic ray casting.
 
     Parameters
     ----------
-    binary_mask : numpy.ndarray
-        Binary array (2D or 3D). 1 where the phase is present, 0 elsewhere.
+    volume       : 3-D integer-labelled array.
+    voxel_size   : physical voxel edge length.
+    phases       : labels to evaluate (None = sorted unique labels in volume).
+    n_lines      : number of random isotropic rays per phase.
+    px_min_mean  : minimum chord length in voxels included in the mean
+                   (filters short boundary slivers).
+    seed         : RNG seed; per-phase seed = ``seed + phase``.
 
     Returns
     -------
-    float
-        Mean of the Euclidean distance transform within the phase region.
-        Returns 0.0 if the phase is absent.
+    np.ndarray of shape (n_phases,) — mean chord length per phase, in the
+    same order as `phases` (or sorted unique labels if `phases` is None).
+    NaN entries indicate a phase with no chord passing the filter.
     """
-    if binary_mask.sum() == 0:
-        return 0.0
-    
-    dt = scipy.ndimage.distance_transform_edt(binary_mask) # distance to nearest zero (boundary)
-    vals = dt[binary_mask > 0]
-    return float(vals.mean())
+    if voxel_size <= 0:
+        raise ValueError("voxel_size must be positive.")
+    if volume.ndim != 3:
+        raise ValueError("volume must be 3-D.")
+
+    if phases is None:
+        phases = sorted(int(p) for p in np.unique(volume))
+
+    min_len = px_min_mean * voxel_size
+    means = np.full(len(phases), np.nan, dtype=np.float64)
+
+    for k, p in enumerate(phases):
+        mask = volume == p
+        if not mask.any():
+            continue
+        chords = _isotropic_chords(
+            mask, voxel_size, n_lines,
+            None if seed is None else seed + int(p),
+        )
+        kept = chords[chords >= min_len]
+        if kept.size:
+            means[k] = float(kept.mean())
+
+    return means
+
+
+def _isotropic_chords(
+    mask: np.ndarray,
+    voxel_size: float,
+    n_lines: int,
+    seed: int | None,
+) -> np.ndarray:
+    """Cast `n_lines` isotropic rays through `mask`; return chord lengths in physical units."""
+    nx, ny, nz = mask.shape
+    rng = np.random.default_rng(seed)
+    points = rng.uniform(0.0, np.array([nx, ny, nz], dtype=float), size=(n_lines, 3))
+    dirs = rng.normal(size=(n_lines, 3))
+    norms = np.linalg.norm(dirs, axis=1)
+    keep = norms > 1e-15
+    points = np.ascontiguousarray(points[keep], dtype=np.float64)
+    dirs = np.ascontiguousarray(dirs[keep] / norms[keep, None], dtype=np.float64)
+    return _trace(mask, points, dirs, px_min=1.0, voxel_size=voxel_size)
+
+
+def _trace(vol, points, dirs, px_min, voxel_size):
+    """Vectorised Amanatides-Woo voxel traversal across all rays in lockstep."""
+    N = points.shape[0]
+    nx, ny, nz = vol.shape
+    eps = 1e-12
+    tol = 1e-12
+    INF = 1e300
+    tiny = 1e-15
+
+    dx = dirs[:, 0].copy()
+    dy = dirs[:, 1].copy()
+    dz = dirs[:, 2].copy()
+    p0 = points[:, 0].copy()
+    p1 = points[:, 1].copy()
+    p2 = points[:, 2].copy()
+
+    def slab(p, d, L):
+        """Parametric entry/exit interval [lo, hi] for 0 <= p + t*d <= L."""
+        safe_d = np.where(np.abs(d) > tiny, d, 1.0)
+        t1 = -p / safe_d
+        t2 = (L - p) / safe_d
+        lo = np.minimum(t1, t2)
+        hi = np.maximum(t1, t2)
+        parallel = np.abs(d) <= tiny
+        outside = parallel & ((p < 0.0) | (p > L))
+        inside = parallel & ~outside
+        lo = np.where(inside, -INF, lo)
+        hi = np.where(inside, INF, hi)
+        lo = np.where(outside, INF, lo)
+        hi = np.where(outside, -INF, hi)
+        return lo, hi
+
+    lox, hix = slab(p0, dx, float(nx))
+    loy, hiy = slab(p1, dy, float(ny))
+    loz, hiz = slab(p2, dz, float(nz))
+    t_lo = np.maximum(np.maximum(lox, loy), loz)
+    t_hi = np.minimum(np.minimum(hix, hiy), hiz)
+
+    active = t_hi > t_lo
+    if not active.any():
+        return np.empty(0, dtype=np.float64)
+
+    # Entry voxel: nudge by eps so we land just inside the first voxel
+    t = np.where(active, t_lo, 0.0)
+    ex = p0 + (t + eps) * dx
+    ey = p1 + (t + eps) * dy
+    ez = p2 + (t + eps) * dz
+    ix = np.clip(np.floor(ex).astype(np.int64), 0, nx - 1)
+    iy = np.clip(np.floor(ey).astype(np.int64), 0, ny - 1)
+    iz = np.clip(np.floor(ez).astype(np.int64), 0, nz - 1)
+
+    def aw_setup(d, p, i):
+        """Amanatides-Woo per-axis (step, t_max, t_delta)."""
+        safe_d = np.where(np.abs(d) > tiny, d, 1.0)
+        t_max = np.where(
+            d > 0, (i + 1.0 - p) / safe_d,
+            np.where(d < 0, (i - p) / safe_d, INF),
+        )
+        t_delta = np.where(
+            d > 0, 1.0 / safe_d,
+            np.where(d < 0, -1.0 / safe_d, INF),
+        )
+        step = np.where(d > 0, 1, np.where(d < 0, -1, 0)).astype(np.int64)
+        return step, t_max, t_delta
+
+    step_x, t_max_x, t_d_x = aw_setup(dx, p0, ix)
+    step_y, t_max_y, t_d_y = aw_setup(dy, p1, iy)
+    step_z, t_max_z, t_d_z = aw_setup(dz, p2, iz)
+
+    # Physical length per unit t along the ray (|d * voxel_size|; = voxel_size for unit d, isotropic voxels)
+    scale = np.sqrt((dx * voxel_size) ** 2 + (dy * voxel_size) ** 2 + (dz * voxel_size) ** 2)
+
+    cur = vol[ix, iy, iz].astype(np.int64)
+    run = np.zeros(N, dtype=np.float64)
+    chord_buf: list[np.ndarray] = []
+
+    max_iters = 3 * (nx + ny + nz) + 10
+    for _ in range(max_iters):
+        if not active.any():
+            break
+
+        # Distance to next voxel boundary or box exit
+        t_next = np.minimum(np.minimum(t_max_x, t_max_y), t_max_z)
+        t_next = np.minimum(t_next, t_hi)
+        seg = t_next - t
+
+        # Phase at current voxel
+        ix_c = np.clip(ix, 0, nx - 1)
+        iy_c = np.clip(iy, 0, ny - 1)
+        iz_c = np.clip(iz, 0, nz - 1)
+        ph = vol[ix_c, iy_c, iz_c].astype(np.int64)
+
+        same = (ph == cur) & active
+        change = (~same) & active
+        # Extend the current-phase run on same-phase segments
+        run[same] += seg[same]
+        # Emit chord on phase change (only if previous phase was the target and run is long enough)
+        emit = change & (run > px_min) & (cur != 0)
+        if emit.any():
+            chord_buf.append(run[emit] * scale[emit])
+        # Reset run + update tracked phase on change
+        run[change] = seg[change]
+        cur[change] = ph[change]
+
+        # Advance voxel coords along the axis (or axes, if tied) that hit t_next first
+        adv_x = (np.abs(t_max_x - t_next) <= tol) & active
+        adv_y = (np.abs(t_max_y - t_next) <= tol) & active
+        adv_z = (np.abs(t_max_z - t_next) <= tol) & active
+        ix[adv_x] += step_x[adv_x]
+        iy[adv_y] += step_y[adv_y]
+        iz[adv_z] += step_z[adv_z]
+        t_max_x[adv_x] += t_d_x[adv_x]
+        t_max_y[adv_y] += t_d_y[adv_y]
+        t_max_z[adv_z] += t_d_z[adv_z]
+
+        t = t_next
+        # Deactivate rays that exited the box
+        active &= (
+            (t < t_hi - eps)
+            & (ix >= 0) & (ix < nx)
+            & (iy >= 0) & (iy < ny)
+            & (iz >= 0) & (iz < nz)
+        )
+
+    # Flush any run still open at ray exit
+    final_emit = (run > px_min) & (cur != 0)
+    if final_emit.any():
+        chord_buf.append(run[final_emit] * scale[final_emit])
+
+    if not chord_buf:
+        return np.empty(0, dtype=np.float64)
+    return np.concatenate(chord_buf)
 
 
 def compute_conditioning_vector(volume: torch.Tensor, n_phases: int) -> torch.Tensor:
@@ -187,18 +364,21 @@ def compute_conditioning_vector(volume: torch.Tensor, n_phases: int) -> torch.Te
         unique_phases = list(range(n_phases))
         onehot = None
 
-    total = labels.size
-    vf_list = []
-    ps_list = []
+    if onehot is not None:
+        vf = compute_volume_fraction(torch.from_numpy(onehot).float())
+    else:
+        vf = torch.tensor(
+            [(labels == i).mean() for i in range(n_phases)],
+            dtype=torch.float32
+        )
+    
+    # vf = compute_volume_fraction(torch.from_numpy(volume).float())
+    ps = compute_average_pore_size(labels, voxel_size=0.1, px_min_mean=4.0)
+    ps = torch.from_numpy(ps).float()
+    vf = list(vf.numpy())
+    ps = list(ps.numpy())
 
-    for ph_idx in range(n_phases):
-        mask = (labels == ph_idx)
-        vf = mask.sum() / total
-        vf_list.append(vf)
-        ps = compute_average_pore_size(mask.astype(np.uint8))
-        ps_list.append(ps)
-
-    return torch.tensor(vf_list + ps_list, dtype=torch.float32)
+    return torch.tensor(vf + ps, dtype=torch.float32)
 
 
 def compute_dataset_conditioning_stats(dataset_xyz: list, n_phases: int, max_samples: int = 500) -> tuple:

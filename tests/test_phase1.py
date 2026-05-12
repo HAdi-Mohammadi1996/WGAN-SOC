@@ -255,7 +255,6 @@ def test_volume_fraction_sums_to_one():
     vf = compute_volume_fraction(t)
     assert abs(vf.sum().item() - 1.0) < 1e-4
 
-
 # ---------------------------------------------------------------------------
 # compute_average_pore_size
 # ---------------------------------------------------------------------------
@@ -263,11 +262,8 @@ def test_volume_fraction_sums_to_one():
 def test_pore_size_positive():
     """Average pore size must be > 0 for all phases present in the volume."""
     vol = _make_synthetic_vol(shape=(30, 30, 30))
-    phases = np.unique(vol)
-    for ph in phases:
-        mask = (vol == ph).astype(np.uint8)
-        ps = compute_average_pore_size(mask)
-        assert ps > 0.0, f"Pore size should be positive for phase {ph}"
+    cld_mean= compute_average_pore_size(vol, voxel_size=0.1, px_min_mean=4.0)
+    assert all(ps > 0.0 for ps in cld_mean), f"All CLD means should be positive, got {cld_mean}"
 
 
 # ---------------------------------------------------------------------------

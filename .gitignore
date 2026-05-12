@@ -23,3 +23,5 @@ datasets/
 
 # Any file with the scratch prefix
 scratch_*
+
+datasets/
