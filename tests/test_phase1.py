@@ -260,10 +260,18 @@ def test_volume_fraction_sums_to_one():
 # ---------------------------------------------------------------------------
 
 def test_pore_size_positive():
-    """Average pore size must be > 0 for all phases present in the volume."""
-    vol = _make_synthetic_vol(shape=(30, 30, 30))
-    cld_mean= compute_average_pore_size(vol, voxel_size=0.1, px_min_mean=4.0)
-    assert all(ps > 0.0 for ps in cld_mean), f"All CLD means should be positive, got {cld_mean}"
+    """Average pore size must be > 0 for all phases present in 2D and 3D volumes."""
+    vol3d = _make_synthetic_vol(shape=(30, 30, 30))
+    cld_mean_3d = compute_average_pore_size(vol3d, voxel_size=0.1, px_min_mean=4.0)
+    assert all(ps > 0.0 for ps in cld_mean_3d), (
+        f"All 3D CLD means should be positive, got {cld_mean_3d}"
+    )
+
+    vol2d = vol3d[0]  # use one 2D slice of the synthetic volume
+    cld_mean_2d = compute_average_pore_size(vol2d, voxel_size=0.1, px_min_mean=4.0)
+    assert all(ps > 0.0 for ps in cld_mean_2d), (
+        f"All 2D CLD means should be positive, got {cld_mean_2d}"
+    )
 
 
 # ---------------------------------------------------------------------------
