@@ -9,6 +9,7 @@ import numpy as np
 import scipy.io
 import scipy.ndimage
 import torch
+from typing import overload
 
 # ---------------------------------------------------------------------------
 # MAT file loading
@@ -128,6 +129,17 @@ def compute_volume_fraction(volume: torch.Tensor) -> torch.Tensor:
     vf = volume.reshape(n_phases, -1).sum(dim=1).float() / total
     return vf
 
+@overload
+def compute_average_pore_size(
+    volume: np.ndarray,
+    voxel_size: float = 1.0,
+    phases: list[int] | None = None,
+    n_lines: int = 500_000,
+    px_min_mean: float = 4.0,
+    seed: int | None = 42,
+) -> np.ndarray: ...
+
+
 def compute_average_pore_size(volume: np.ndarray, voxel_size: float = 1.0,
     phases: list[int] | None = None, n_lines: int = 500_000,
     px_min_mean: float = 4.0, seed: int | None = 42,) -> np.ndarray:
@@ -136,7 +148,7 @@ def compute_average_pore_size(volume: np.ndarray, voxel_size: float = 1.0,
 
     Parameters
     ----------
-    volume       : 3-D integer-labelled array.
+    volume       : 2-D or 3-D integer-labelled array.
     voxel_size   : physical voxel edge length.
     phases       : labels to evaluate (None = sorted unique labels in volume).
     n_lines      : number of random isotropic rays per phase.
@@ -152,8 +164,8 @@ def compute_average_pore_size(volume: np.ndarray, voxel_size: float = 1.0,
     """
     if voxel_size <= 0:
         raise ValueError("voxel_size must be positive.")
-    if volume.ndim != 3:
-        raise ValueError("volume must be 3-D.")
+    if volume.ndim not in (2, 3):
+        raise ValueError("volume must be 2-D or 3-D.")
 
     if phases is None:
         phases = sorted(int(p) for p in np.unique(volume))
@@ -165,10 +177,18 @@ def compute_average_pore_size(volume: np.ndarray, voxel_size: float = 1.0,
         mask = volume == p
         if not mask.any():
             continue
-        chords = _isotropic_chords(
-            mask, voxel_size, n_lines,
-            None if seed is None else seed + int(p),
-        )
+
+        if volume.ndim == 3:
+            chords = _isotropic_chords_3d(
+                mask, voxel_size, n_lines,
+                None if seed is None else seed + int(p),
+            )
+        else:
+            chords = _isotropic_chords_2d(
+                mask, voxel_size, n_lines,
+                None if seed is None else seed + int(p),
+            )
+
         kept = chords[chords >= min_len]
         if kept.size:
             means[k] = float(kept.mean())
@@ -176,13 +196,13 @@ def compute_average_pore_size(volume: np.ndarray, voxel_size: float = 1.0,
     return means
 
 
-def _isotropic_chords(
+def _isotropic_chords_3d(
     mask: np.ndarray,
     voxel_size: float,
     n_lines: int,
     seed: int | None,
 ) -> np.ndarray:
-    """Cast `n_lines` isotropic rays through `mask`; return chord lengths in physical units."""
+    """Cast `n_lines` isotropic rays through a 3D mask; return chord lengths in physical units."""
     nx, ny, nz = mask.shape
     rng = np.random.default_rng(seed)
     points = rng.uniform(0.0, np.array([nx, ny, nz], dtype=float), size=(n_lines, 3))
@@ -191,11 +211,29 @@ def _isotropic_chords(
     keep = norms > 1e-15
     points = np.ascontiguousarray(points[keep], dtype=np.float64)
     dirs = np.ascontiguousarray(dirs[keep] / norms[keep, None], dtype=np.float64)
-    return _trace(mask, points, dirs, px_min=1.0, voxel_size=voxel_size)
+    return _trace_3d(mask, points, dirs, px_min=1.0, voxel_size=voxel_size)
 
 
-def _trace(vol, points, dirs, px_min, voxel_size):
-    """Vectorised Amanatides-Woo voxel traversal across all rays in lockstep."""
+def _isotropic_chords_2d(
+    mask: np.ndarray,
+    voxel_size: float,
+    n_lines: int,
+    seed: int | None,
+) -> np.ndarray:
+    """Cast `n_lines` isotropic rays through a 2D mask; return chord lengths in physical units."""
+    nx, ny = mask.shape
+    rng = np.random.default_rng(seed)
+    points = rng.uniform(0.0, np.array([nx, ny], dtype=float), size=(n_lines, 2))
+    dirs = rng.normal(size=(n_lines, 2))
+    norms = np.linalg.norm(dirs, axis=1)
+    keep = norms > 1e-15
+    points = np.ascontiguousarray(points[keep], dtype=np.float64)
+    dirs = np.ascontiguousarray(dirs[keep] / norms[keep, None], dtype=np.float64)
+    return _trace_2d(mask, points, dirs, px_min=1.0, voxel_size=voxel_size)
+
+
+def _trace_3d(vol, points, dirs, px_min, voxel_size):
+    """Vectorised Amanatides-Woo voxel traversal through a 3D volume."""
     N = points.shape[0]
     nx, ny, nz = vol.shape
     eps = 1e-12
@@ -319,6 +357,117 @@ def _trace(vol, points, dirs, px_min, voxel_size):
         )
 
     # Flush any run still open at ray exit
+    final_emit = (run > px_min) & (cur != 0)
+    if final_emit.any():
+        chord_buf.append(run[final_emit] * scale[final_emit])
+
+    if not chord_buf:
+        return np.empty(0, dtype=np.float64)
+    return np.concatenate(chord_buf)
+
+
+def _trace_2d(vol, points, dirs, px_min, voxel_size):
+    """Vectorised Amanatides-Woo voxel traversal through a 2D image."""
+    N = points.shape[0]
+    nx, ny = vol.shape
+    eps = 1e-12
+    tol = 1e-12
+    INF = 1e300
+    tiny = 1e-15
+
+    dx = dirs[:, 0].copy()
+    dy = dirs[:, 1].copy()
+    p0 = points[:, 0].copy()
+    p1 = points[:, 1].copy()
+
+    def slab(p, d, L):
+        safe_d = np.where(np.abs(d) > tiny, d, 1.0)
+        t1 = -p / safe_d
+        t2 = (L - p) / safe_d
+        lo = np.minimum(t1, t2)
+        hi = np.maximum(t1, t2)
+        parallel = np.abs(d) <= tiny
+        outside = parallel & ((p < 0.0) | (p > L))
+        inside = parallel & ~outside
+        lo = np.where(inside, -INF, lo)
+        hi = np.where(inside, INF, hi)
+        lo = np.where(outside, INF, lo)
+        hi = np.where(outside, -INF, hi)
+        return lo, hi
+
+    lox, hix = slab(p0, dx, float(nx))
+    loy, hiy = slab(p1, dy, float(ny))
+    t_lo = np.maximum(lox, loy)
+    t_hi = np.minimum(hix, hiy)
+
+    active = t_hi > t_lo
+    if not active.any():
+        return np.empty(0, dtype=np.float64)
+
+    t = np.where(active, t_lo, 0.0)
+    ex = p0 + (t + eps) * dx
+    ey = p1 + (t + eps) * dy
+    ix = np.clip(np.floor(ex).astype(np.int64), 0, nx - 1)
+    iy = np.clip(np.floor(ey).astype(np.int64), 0, ny - 1)
+
+    def aw_setup(d, p, i):
+        safe_d = np.where(np.abs(d) > tiny, d, 1.0)
+        t_max = np.where(
+            d > 0, (i + 1.0 - p) / safe_d,
+            np.where(d < 0, (i - p) / safe_d, INF),
+        )
+        t_delta = np.where(
+            d > 0, 1.0 / safe_d,
+            np.where(d < 0, -1.0 / safe_d, INF),
+        )
+        step = np.where(d > 0, 1, np.where(d < 0, -1, 0)).astype(np.int64)
+        return step, t_max, t_delta
+
+    step_x, t_max_x, t_d_x = aw_setup(dx, p0, ix)
+    step_y, t_max_y, t_d_y = aw_setup(dy, p1, iy)
+
+    scale = np.sqrt((dx * voxel_size) ** 2 + (dy * voxel_size) ** 2)
+
+    cur = vol[ix, iy].astype(np.int64)
+    run = np.zeros(N, dtype=np.float64)
+    chord_buf: list[np.ndarray] = []
+
+    max_iters = 2 * (nx + ny) + 10
+    for _ in range(max_iters):
+        if not active.any():
+            break
+
+        t_next = np.minimum(t_max_x, t_max_y)
+        t_next = np.minimum(t_next, t_hi)
+        seg = t_next - t
+
+        ix_c = np.clip(ix, 0, nx - 1)
+        iy_c = np.clip(iy, 0, ny - 1)
+        ph = vol[ix_c, iy_c].astype(np.int64)
+
+        same = (ph == cur) & active
+        change = (~same) & active
+        run[same] += seg[same]
+        emit = change & (run > px_min) & (cur != 0)
+        if emit.any():
+            chord_buf.append(run[emit] * scale[emit])
+        run[change] = seg[change]
+        cur[change] = ph[change]
+
+        adv_x = (np.abs(t_max_x - t_next) <= tol) & active
+        adv_y = (np.abs(t_max_y - t_next) <= tol) & active
+        ix[adv_x] += step_x[adv_x]
+        iy[adv_y] += step_y[adv_y]
+        t_max_x[adv_x] += t_d_x[adv_x]
+        t_max_y[adv_y] += t_d_y[adv_y]
+
+        t = t_next
+        active &= (
+            (t < t_hi - eps)
+            & (ix >= 0) & (ix < nx)
+            & (iy >= 0) & (iy < ny)
+        )
+
     final_emit = (run > px_min) & (cur != 0)
     if final_emit.any():
         chord_buf.append(run[final_emit] * scale[final_emit])
