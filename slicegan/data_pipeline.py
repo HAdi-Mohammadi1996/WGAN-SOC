@@ -9,7 +9,6 @@ import numpy as np
 import scipy.io
 import scipy.ndimage
 import torch
-from typing import overload
 
 # ---------------------------------------------------------------------------
 # MAT file loading
@@ -128,17 +127,6 @@ def compute_volume_fraction(volume: torch.Tensor) -> torch.Tensor:
     total = volume[0].numel()
     vf = volume.reshape(n_phases, -1).sum(dim=1).float() / total
     return vf
-
-@overload
-def compute_average_pore_size(
-    volume: np.ndarray,
-    voxel_size: float = 1.0,
-    phases: list[int] | None = None,
-    n_lines: int = 500_000,
-    px_min_mean: float = 4.0,
-    seed: int | None = 42,
-) -> np.ndarray: ...
-
 
 def compute_average_pore_size(volume: np.ndarray, voxel_size: float = 1.0,
     phases: list[int] | None = None, n_lines: int = 500_000,

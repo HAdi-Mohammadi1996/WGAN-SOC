@@ -285,6 +285,30 @@ def test_conditioning_vector_length():
     assert vec.shape == (2 * N_PHASES,)
 
 
+def test_conditioning_vector_2d():
+    """Conditioning vector works on 2D inputs: raw label slice and one-hot patch."""
+    vol3d = _make_synthetic_vol(shape=(30, 30, 30))
+
+    # Raw 2D integer label slice (shape H x W)
+    slice_2d = vol3d[0]
+    vec = compute_conditioning_vector(slice_2d, n_phases=N_PHASES)
+    assert vec.shape == (2 * N_PHASES,), f"Expected length {2 * N_PHASES}, got {vec.shape}"
+    ps = vec[N_PHASES:]
+    assert all(ps_val > 0.0 for ps_val in ps.tolist()), f"All 2D pore sizes should be > 0, got {ps}"
+
+    # One-hot 2D patch (shape n_phases x H x W) — matches compute_dataset_conditioning_stats input
+    unique_labels = np.unique(vol3d)
+    label_to_idx = {lbl: idx for idx, lbl in enumerate(sorted(unique_labels.tolist()))}
+    labels_2d = np.vectorize(label_to_idx.get)(slice_2d)
+    onehot_2d = np.zeros((N_PHASES, slice_2d.shape[0], slice_2d.shape[1]), dtype=np.float32)
+    for i in range(N_PHASES):
+        onehot_2d[i] = (labels_2d == i).astype(np.float32)
+    vec_oh = compute_conditioning_vector(onehot_2d, n_phases=N_PHASES)
+    assert vec_oh.shape == (2 * N_PHASES,), f"Expected length {2 * N_PHASES}, got {vec_oh.shape}"
+    ps_oh = vec_oh[N_PHASES:]
+    assert all(ps_val > 0.0 for ps_val in ps_oh.tolist()), f"All one-hot 2D pore sizes should be > 0, got {ps_oh}"
+
+
 # ---------------------------------------------------------------------------
 # Augmentation
 # ---------------------------------------------------------------------------
