@@ -15,6 +15,10 @@ from .data_pipeline import (
     augment_volume,
 )
 
+from . import util
+from . import model
+from .model import train
+
 __all__ = [
     # Preprocessing
     "batch",
@@ -28,4 +32,8 @@ __all__ = [
     "compute_dataset_conditioning_stats",
     # Augmentation
     "augment_volume",
+    # Training
+    "train",
+    "util",
+    "model",
 ]
