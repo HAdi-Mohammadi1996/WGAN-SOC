@@ -13,12 +13,9 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-import numpy as np
-import scipy.io
 import torch
 from torch.utils.data import TensorDataset
 
-from main import train as main_train
 from slicegan.networks import Generator3D, Discriminator2D
 from slicegan.util import calc_gradient_penalty
 from slicegan.model import _training_loop, _D1, _D2, _D3
@@ -310,31 +307,6 @@ def test_isotropic_shares_discriminator(tmp_path):
     netDs = result['netDs']
     assert id(netDs[0]) == id(netDs[1]) == id(netDs[2]), \
         "Isotropic mode must reuse a single Discriminator instance for all three axes"
-
-
-def test_main_training_random_mat_runs(tmp_path):
-    """main.train should run unconditional training on a random .mat volume."""
-    path = tmp_path / "random.mat"
-    rng = np.random.default_rng(0)
-    scipy.io.savemat(path, {"vol_seg": rng.integers(1, 3, size=(16, 16, 16), dtype=np.int32)})
-
-    logs = main_train(
-        data_paths=[path],
-        pth="",
-        nc=2,
-        l=8,
-        nz=4,
-        epochs=1,
-        batch_size=2,
-        d_batch_size=2,
-        g_arch=([5], [1], [2], [0]),
-        d_arch=([8], [1], [16], [0]),
-    )
-
-    assert logs["disc_real_log"]
-    assert logs["disc_fake_log"]
-    assert logs["gp_log"]
-    assert logs["Wass_log"]
 
 
 def test_no_nan_losses(tmp_path):

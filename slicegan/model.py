@@ -1,4 +1,6 @@
 import time
+from os import PathLike
+from pathlib import Path
 import torch
 from torch.optim import Adam
 from torch.utils.data import DataLoader
@@ -233,4 +235,49 @@ def train(pth, imtype, datatype, real_data, Disc, Gen, nc, l, nz, sf):
     sf : int
         Scale factor for spatial downsampling before patching.
     """
-    pass
+    if isinstance(real_data, (str, PathLike)):
+        real_data = [real_data]
+    else:
+        real_data = list(real_data)
+    isotropic = False
+    if len(real_data) == 1:
+        real_data *= 3
+        isotropic = True
+    elif len(real_data) != 3:
+        raise ValueError(
+            "real_data must contain either one isotropic path or three "
+            "anisotropic axis paths."
+        )
+
+    datasets = preprocessing.batch(real_data, datatype, l, sf)
+
+    gf = list(_GF)
+    gf[-1] = nc
+    netG = Gen(nz=nz, n_phases=nc, gk=_GK, gs=_GS, gf=gf, gp=_GP)
+
+    def _make_disc():
+        return Disc(
+            n_phases=nc,
+            n_conditions=0,
+            dk=_DK,
+            ds=_DS,
+            df=_DF,
+            dp=_DP,
+        )
+
+    netD = _make_disc() if isotropic else [_make_disc(), _make_disc(), _make_disc()]
+
+    if pth:
+        Path(pth).parent.mkdir(parents=True, exist_ok=True)
+
+    return _training_loop(
+        datasets,
+        netG,
+        netD,
+        nc,
+        l,
+        nz,
+        pth=pth,
+        isotropic=isotropic,
+        imtype=imtype,
+    )
