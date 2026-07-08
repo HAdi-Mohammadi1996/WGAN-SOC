@@ -1,63 +1,49 @@
+# Phase 4: Conditioning Integration
 
----
+**Goal**: Extend the unconditional SliceGAN training loop with per-phase conditioning on volume
+ fraction (VF) and average pore size (PS).
 
-### Phase 3: Training Loop (Unconditional Baseline)
+ **What changes vs Phase 3 (`_training_loop`)**:
+ - Generator step: conditioning vector is encoded via `ConditioningEncoder` → embedded maps are
+   cat-ed with z before layer 1.
+ - Discriminator step: conditioning vector is tiled to 2D spatial maps and appended as extra input
+   channels to both real and fake slices.
+ - Regression loss: `MSE(D_regression(real_slice), true_cond_vector)` is added to the discriminator
+   loss, weighted by `lambda_reg`.
+ - Curriculum: `lambda_reg` is annealed over three stages (see table below) to prevent premature
+   collapse.
 
-**Goal**: Replicate  SliceGAN exactly as the unconditional baseline before adding any conditioning.
+ **Staged curriculum**:
 
-**Background — exact hyperparameters from SliceGAN `model.py`**:
+ | Stage | Epochs   | lambda_reg          | Effect                                 |
+ |-------|----------|---------------------|----------------------------------------|
+ | 1     | 1–50     | 0.0                 | Identical to unconditional baseline    |
+ | 2     | 51–150   | 0.1 → 1.0 (linear) | Conditioning warmup                    |
+ | 3     | 151+     | 1.0                 | Full conditioning                      |
 
-```python
-num_epochs    = 100
-batch_size    = 8        # generator batch size
-D_batch_size  = 8        # discriminator batch size
-lrg           = 0.0001
-lrd           = 0.0001
-beta1         = 0.9      # NOTE: repo uses 0.9
-beta2         = 0.99     # NOTE: repo uses 0.99
-Lambda        = 10       # gradient penalty coefficient
-critic_iters  = 5        # NOTE: discriminator steps per generator step — NOT 1
-lz            = 4        # latent spatial size
-workers       = 0        # DataLoader workers
-```
+ **Conditioning vector format** (unchanged from Phase 1):
+ `[vf_0, ..., vf_{N-1}, ps_0, ..., ps_{N-1}]` — length `2 * n_phases`.
+ Normalised to zero-mean/unit-std using stats computed by `compute_dataset_conditioning_stats`.
 
-**Training loop structure from `model.py`**:
+ **New files**:
+- `slicegan/curriculum.py` — `get_lambda_reg(epoch, ...)`, `LambdaSchedule` class
+- `tests/test_phase4.py` — 10 tests
 
-- Outer loop over epochs; inner loop zips the three axis dataloaders: `for i, (datax, datay, dataz) in enumerate(zip(dataloaderx, dataloadery, dataloaderz))`
-- Each iteration: run `critic_iters=5` discriminator updates, then 1 generator update when `i % critic_iters == 0`
-- Discriminator update: generate fake volume, apply permute+reshape slicing, compute `out_fake - out_real + gradient_penalty`, call `disc_cost.backward()` + `optimizer.step()`
-- Generator update: generate new fake volume, slice, compute `-mean(D(fake))` summed over axes, call `errG.backward()` + `optG.step()`
-- Checkpoint + sample images saved every 25 iterations via `torch.save` + `util.test_plotter`
-- Logs: `disc_real_log`, `disc_fake_log`, `gp_log`, `Wass_log` per iteration
+**Modified files**:
+ - `slicegan/model.py` — add `train_conditional()`, `sample_conditioning_from_batch()`,
+   `generate_conditioned_samples()`
 
-**Tasks**:
+ **Tests — `tests/test_phase4.py`** (all must pass before proceeding):
 
-1. Implement `util.calc_gradient_penalty(netD, real_data, fake_data, batch_size, l, device, Lambda, nc)` matching the SliceGAN `util.py` function signature
-
-2. Implement `util.test_plotter(img, n_slices, imtype, path)` for saving sample slice images
-
-3. Implement `util.calc_eta(steps, time_now, start, i, epoch, num_epochs)` for ETA logging
-
-4. Implement `model.train(pth, imtype, datatype, real_data, Disc, Gen, nc, l, nz, sf)` matching the SliceGAN `model.py` function signature exactly, including:
-   - Three separate DataLoaders for x, y, z axes from `dataset_xyz`
-   - Isotropic check: `if len(real_data) == 1: real_data *= 3; isotropic = True`
-   - One discriminator (isotropic) or three discriminators (anisotropic)
-   - The exact permutation slicing with `d1,d2,d3` tuples `[2,3,4],[3,2,2],[4,4,3]`
-   - Save checkpoint to `pth + '_Gen.pt'` and `pth + '_Disc.pt'` every 25 iterations
-
-**Tests — `tests/test_phase3.py`** (all must pass before proceeding):
-
-| Test | What it checks | Pass criterion |
-|------|---------------|----------------|
-| `test_slice_permutation_shapes` | Slicing produces correct 2D shapes for all axes | `[l*batch, nc, l, l]` for each axis |
-| `test_slice_permutation_axes_distinct` | Three axis slicings are genuinely different views | Mean pixel values differ across axes |
-| `test_gradient_penalty_positive` | GP is positive and finite | GP > 0 and not NaN |
-| `test_discriminator_update_runs` | One discriminator step completes | Scalar loss returned, no error |
-| `test_generator_update_runs` | One generator step completes | Scalar loss returned, no error |
-| `test_critic_iters_respected` | Generator only updates every 5 iterations | Generator params unchanged after 4 steps, changed after 5 |
-| `test_all_four_logs_populated` | All four log lists populated | `disc_real_log`, `disc_fake_log`, `gp_log`, `Wass_log` all non-empty |
-| `test_checkpoint_naming` | Checkpoint saved with correct filenames | `pth + '_Gen.pt'` and `pth + '_Disc.pt'` exist |
-| `test_checkpoint_reproducibility` | Reloaded generator produces identical output | Max abs diff < 1e-6 for same seed |
-| `test_isotropic_shares_discriminator` | Isotropic mode reuses `netDs[0]` | Single discriminator updated for all axes |
-| `test_no_nan_losses` | Training is numerically stable | Zero NaN losses over 100 iterations |
-| `test_wasserstein_distance_improves` | Training makes progress | Mean Wass distance over last 10 steps < first 10 steps |
+ | Test | What it checks | Pass criterion |
+ |------|---------------|----------------|
+ | `test_generator_input_shape_with_conditioning` | Generator input includes conditioning embedding | `[batch, nz+embed_dim, 4, 4, 4]` |
+ | `test_discriminator_input_channels` | Conditioning channels appended to slices | In-channels == `n_phases + conditioning_dim` |
+ | `test_regression_loss_zero_on_perfect` | Loss == 0 when pred equals target | Loss < 1e-6 |
+ | `test_regression_loss_decreases` | Regression loss improves over 200 steps | Loss at step 200 < step 0 |
+ | `test_stage1_lambda_reg_is_zero` | Stage 1 returns `lambda_reg=0` | `get_lambda_reg(epoch ≤ 50) == 0.0` |
+ | `test_stage2_lambda_schedule` | Lambda increases linearly in stage 2 | Values match expected schedule |
+ | `test_conditioning_normalisation` | Normalisation uses dataset stats | Output is z-scored correctly |
+ | `test_conditioned_generation_shape` | `generate_conditioned_samples` output shape | `[n_samples, n_phases, 64, 64, 64]` |
+ | `test_conditioning_rough_accuracy` | Short training shifts VF toward target | VF within 20 % relative error of target |
+ | `test_no_nan_losses` | Numerical stability | Zero NaN losses over 500 iterations |
