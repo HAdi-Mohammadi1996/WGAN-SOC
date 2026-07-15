@@ -7,6 +7,7 @@ from torch.utils.data import DataLoader
 
 from . import preprocessing
 from . import util
+from .data_pipeline import compute_conditioning_vector
 from .util import calc_gradient_penalty
 
 # ── SliceGAN exact hyperparameters ──────────────────────────────────────────
@@ -37,6 +38,25 @@ _DP = [1, 1, 1, 1, 0]
 _D1 = [2, 3, 4]
 _D2 = [3, 2, 2]
 _D3 = [4, 4, 3]
+
+
+def sample_conditioning_from_batch(patches, norm_stats):
+    """Compute normalised [VF, PS] conditioning vectors for a batch of patches."""
+    if patches.ndim != 4:
+        raise ValueError("patches must have shape [batch, n_phases, height, width].")
+
+    n_phases = patches.shape[1]
+    mean, std = norm_stats
+    dtype = patches.dtype if patches.is_floating_point() else torch.float32
+
+    vectors = [
+        torch.as_tensor(compute_conditioning_vector(patch.numpy(), n_phases))
+        for patch in patches.detach().cpu()
+    ]
+    cond = torch.stack(vectors).to(device=patches.device, dtype=dtype)
+    mean = torch.as_tensor(mean, device=patches.device, dtype=dtype)
+    std = torch.as_tensor(std, device=patches.device, dtype=dtype)
+    return (cond - mean) / std.clamp_min(1e-8)
 
 
 def _training_loop(

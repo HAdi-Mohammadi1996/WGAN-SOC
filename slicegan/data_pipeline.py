@@ -510,7 +510,10 @@ def compute_conditioning_vector(volume: torch.Tensor, n_phases: int) -> torch.Te
         )
     
     # vf = compute_volume_fraction(torch.from_numpy(volume).float())
-    ps = compute_average_pore_size(labels, voxel_size=0.1, px_min_mean=4.0)
+    ps = compute_average_pore_size(
+        labels, voxel_size=0.1, phases=list(range(n_phases)), px_min_mean=4.0
+    )
+    ps = np.nan_to_num(ps, nan=0.0)
     ps = torch.from_numpy(ps).float()
     vf = list(vf.numpy())
     ps = list(ps.numpy())
