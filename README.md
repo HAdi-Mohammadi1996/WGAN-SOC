@@ -1,49 +1,51 @@
-# Phase 4: Conditioning Integration
+# Phase 5: Validation and Evaluation
 
-**Goal**: Extend the unconditional SliceGAN training loop with per-phase conditioning on volume
- fraction (VF) and average pore size (PS).
+**Goal**: Quantify the quality of generated microstructures relative to real data and verify that
+conditioning vectors are reflected in the outputs.
 
- **What changes vs Phase 3 (`_training_loop`)**:
- - Generator step: conditioning vector is encoded via `ConditioningEncoder` → embedded maps are
-   cat-ed with z before layer 1.
- - Discriminator step: conditioning vector is tiled to 2D spatial maps and appended as extra input
-   channels to both real and fake slices.
- - Regression loss: `MSE(D_regression(real_slice), true_cond_vector)` is added to the discriminator
-   loss, weighted by `lambda_reg`.
- - Curriculum: `lambda_reg` is annealed over three stages (see table below) to prevent premature
-   collapse.
+**New files**:
+- `slicegan/metrics.py` — `MicrostructureMetrics` class + standalone validation functions
+- `tests/test_phase5.py` — 10 tests
 
- **Staged curriculum**:
+**`MicrostructureMetrics` class** (all methods accept integer-labelled 3-D `np.ndarray` unless noted):
 
- | Stage | Epochs   | lambda_reg          | Effect                                 |
- |-------|----------|---------------------|----------------------------------------|
- | 1     | 1–50     | 0.0                 | Identical to unconditional baseline    |
- | 2     | 51–150   | 0.1 → 1.0 (linear) | Conditioning warmup                    |
- | 3     | 151+     | 1.0                 | Full conditioning                      |
+| Method | Signature | Returns |
+|--------|-----------|---------|
+| `volume_fraction` | `(volume, n_phases)` | `np.ndarray` shape `(n_phases,)`, sums to 1.0 |
+| `average_pore_size` | `(volume, phase_idx)` | `float` — mean chord length (voxels) |
+| `relative_surface_area` | `(volume, phase_idx)` | `float` — interface faces / total voxels |
+| `two_point_correlation` | `(volume, phase_idx, max_r)` | `np.ndarray` length `max_r+1`, S₂(r) |
+| `triple_phase_boundary_density` | `(volume)` | `float` — TPB edges / total voxels (3-phase only) |
+| `inter_slice_coherence` | `(volume)` | `float` in [0, 1] — mean adjacent-slice agreement |
 
- **Conditioning vector format** (unchanged from Phase 1):
- `[vf_0, ..., vf_{N-1}, ps_0, ..., ps_{N-1}]` — length `2 * n_phases`.
- Normalised to zero-mean/unit-std using stats computed by `compute_dataset_conditioning_stats`.
+**Standalone functions**:
 
- **New files**:
-- `slicegan/curriculum.py` — `get_lambda_reg(epoch, ...)`, `LambdaSchedule` class
-- `tests/test_phase4.py` — 10 tests
+| Function | Returns |
+|----------|---------|
+| `conditioning_accuracy_test(netG, cond_enc, test_vectors, n_samples, nz, lz, norm_stats, device)` | `dict` with `'r2'` and `'mae'` floats |
+| `statistical_similarity_test(real_volumes, generated_volumes)` | `dict` mapping metric name → `{'statistic', 'pvalue'}` |
+| `visualise_volume(volume, imtype, save_path)` | None — saves PNG at `save_path` |
 
-**Modified files**:
- - `slicegan/model.py` — add `train_conditional()`, `sample_conditioning_from_batch()`,
-   `generate_conditioned_samples()`
+**Two-point correlation** S₂(r): probability that two voxels separated by lag r (along axis 0)
+are both in `phase_idx`. At r=0 equals VF; approaches VF² for large r (independence).
 
- **Tests — `tests/test_phase4.py`** (all must pass before proceeding):
+**Inter-slice coherence**: for each axis, fraction of voxels with same phase in adjacent slice
+pairs, averaged over all pairs and all 3 axes.
 
- | Test | What it checks | Pass criterion |
- |------|---------------|----------------|
- | `test_generator_input_shape_with_conditioning` | Generator input includes conditioning embedding | `[batch, nz+embed_dim, 4, 4, 4]` |
- | `test_discriminator_input_channels` | Conditioning channels appended to slices | In-channels == `n_phases + conditioning_dim` |
- | `test_regression_loss_zero_on_perfect` | Loss == 0 when pred equals target | Loss < 1e-6 |
- | `test_regression_loss_decreases` | Regression loss improves over 200 steps | Loss at step 200 < step 0 |
- | `test_stage1_lambda_reg_is_zero` | Stage 1 returns `lambda_reg=0` | `get_lambda_reg(epoch ≤ 50) == 0.0` |
- | `test_stage2_lambda_schedule` | Lambda increases linearly in stage 2 | Values match expected schedule |
- | `test_conditioning_normalisation` | Normalisation uses dataset stats | Output is z-scored correctly |
- | `test_conditioned_generation_shape` | `generate_conditioned_samples` output shape | `[n_samples, n_phases, 64, 64, 64]` |
- | `test_conditioning_rough_accuracy` | Short training shifts VF toward target | VF within 20 % relative error of target |
- | `test_no_nan_losses` | Numerical stability | Zero NaN losses over 500 iterations |
+**TPB density**: fraction of face-edges (in each of 3 axis-aligned planes) whose surrounding
+2×2 quad contains all 3 phases. Defined only for 3-phase volumes.
+
+**Tests — `tests/test_phase5.py`** (all must pass before proceeding):
+
+| Test | What it checks | Pass criterion |
+|------|---------------|----------------|
+| `test_vf_matches_phase1` | Metrics VF equals `compute_volume_fraction` from data_pipeline | Identical to 1e-6 |
+| `test_s2_at_zero_equals_vf` | S₂(0) == volume fraction | Within 1e-4 |
+| `test_s2_at_infinity` | S₂(max_r) ≈ vf² | Within 5 % of `vf²` |
+| `test_ks_same_distribution` | KS accepts matched VF samples | p > 0.05 |
+| `test_ks_different_distributions` | KS rejects mismatched VF samples | p < 0.05 |
+| `test_coherence_uniform_volume` | Coherence == 1.0 for single-phase volume | Within 1e-5 |
+| `test_coherence_random_volume` | Coherence < 1.0 for iid noise volume | Score < 1.0 |
+| `test_tpb_density_non_negative` | TPB density is non-negative | Value >= 0 |
+| `test_conditioning_accuracy_runs` | Accuracy test runs without crash | No NaN; R² <= 1.0 |
+| `test_visualisation_saves` | PNG written to disk | `os.path.exists(save_path)` |
