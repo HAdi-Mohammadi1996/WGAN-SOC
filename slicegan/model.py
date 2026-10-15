@@ -560,7 +560,7 @@ def train_conditional(
 def generate_conditioned_samples(
     netG, cond_enc, cond_vector, n_samples, nz, lz, norm_stats, device
 ):
-    """Generate hard-segmented volumes conditioned on a target conditioning vector.
+    """Generate soft (softmax) volumes conditioned on a target conditioning vector.
 
     Parameters
     ----------
@@ -583,7 +583,8 @@ def generate_conditioned_samples(
     Returns
     -------
     torch.Tensor
-        Shape ``[n_samples, n_phases, l, l, l]`` — argmax-segmented (long).
+        Shape ``[n_samples, n_phases, l, l, l]`` — soft softmax output; apply
+        ``argmax(dim=1)`` for hard segmentation.
     """
     device = torch.device(device) if isinstance(device, str) else device
     netG = netG.to(device).eval()

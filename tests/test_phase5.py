@@ -24,6 +24,8 @@ import torch.nn.functional as F
 from slicegan.metrics import (
     MicrostructureMetrics,
     conditioning_accuracy_test,
+    edge_centre_consistency,
+    phase_colormap,
     statistical_similarity_test,
     visualise_volume,
 )
@@ -135,8 +137,10 @@ def test_ks_different_distributions():
         [vol_a.copy() for _ in range(20)],
         [vol_b.copy() for _ in range(20)],
     )
+    # Only VF differs by construction; the layered volumes share SA and coherence.
     for key, res in result.items():
-        assert res['pvalue'] < 0.05, f"{key}: pvalue={res['pvalue']:.4f}"
+        if key.startswith('vf_'):
+            assert res['pvalue'] < 0.05, f"{key}: pvalue={res['pvalue']:.4f}"
 
 
 # ---------------------------------------------------------------------------
@@ -215,6 +219,94 @@ def test_visualisation_saves(tmp_path):
     save_path = str(tmp_path / "test_vol.png")
     visualise_volume(vol, 'nphase', save_path)
     assert os.path.exists(save_path), f"File not found: {save_path}"
+
+
+# ---------------------------------------------------------------------------
+# Extended validation (beyond the spec test table)
+# ---------------------------------------------------------------------------
+
+def test_conditioning_accuracy_scatter_saves(tmp_path):
+    """conditioning_accuracy_test writes VF and PS scatter plots and PS metrics."""
+    torch.manual_seed(0)
+    test_vectors = [[vf0, (1 - vf0) / 2, (1 - vf0) / 2, 2.0, 3.0, 4.0]
+                    for vf0 in [0.2, 0.4]]
+    result = conditioning_accuracy_test(
+        _make_gen(), _make_enc(), test_vectors,
+        n_samples=2, nz=NZ, lz=LZ, norm_stats=_NORM_STATS, device='cpu',
+        save_dir=str(tmp_path), ps_n_lines=2_000,
+    )
+    assert (tmp_path / 'vf_scatter.png').exists()
+    assert (tmp_path / 'ps_scatter.png').exists()
+    assert result['ps_pred'].shape == (2, NC)
+    assert np.isnan(result['r2_ps']) or result['r2_ps'] <= 1.0
+
+
+def test_similarity_all_metrics_keys():
+    """statistical_similarity_test reports KS for every metric family."""
+    np.random.seed(5)
+    vols = [np.random.randint(0, 3, (12, 12, 12)) for _ in range(6)]
+    result = statistical_similarity_test(vols[:3], vols[3:], ps_n_lines=2_000)
+    expected = {f'{m}_phase{p}' for m in ('vf', 'ps', 'sa') for p in range(3)}
+    expected |= {'coherence', 'tpb'}
+    assert expected <= set(result), f"missing: {expected - set(result)}"
+    for res in result.values():
+        assert 0.0 <= res['pvalue'] <= 1.0
+
+
+def test_similarity_boxplot_saves(tmp_path):
+    """statistical_similarity_test writes the box-plot figure when asked."""
+    np.random.seed(6)
+    vols = [np.random.randint(0, 3, (12, 12, 12)) for _ in range(6)]
+    path = tmp_path / 'boxplots.png'
+    statistical_similarity_test(vols[:3], vols[3:], save_path=str(path),
+                                ps_n_lines=2_000)
+    assert path.exists()
+
+
+def test_visualise_colour_consistent(tmp_path):
+    """Label k maps to the same colour whether or not other labels are present."""
+    cmap, norm = phase_colormap(3)
+    full = cmap(norm(np.array([0, 1, 2])))
+    partial = cmap(norm(np.array([0, 2])))
+    np.testing.assert_allclose(partial[1], full[2])
+
+    # A volume without label 1 still renders (defaults to >= 3 phases)
+    vol = np.zeros((8, 8, 8), dtype=np.int64)
+    vol[4:] = 2
+    path = tmp_path / 'partial.png'
+    visualise_volume(vol, 'nphase', str(path))
+    assert path.exists()
+
+
+def test_visualise_accepts_onehot(tmp_path):
+    """visualise_volume accepts a softmax/one-hot [nc, D, H, W] tensor."""
+    soft = torch.softmax(torch.randn(NC, 8, 8, 8), dim=0)
+    path = tmp_path / 'soft.png'
+    visualise_volume(soft, 'nphase', str(path))
+    assert path.exists()
+
+
+def test_edge_centre_uniform_passes():
+    """A volume with identical statistics at edge and centre passes the check."""
+    vol = np.ones((16, 16, 16), dtype=np.int64)
+    res = edge_centre_consistency(vol, shell=4)
+    assert res['passed']
+    np.testing.assert_allclose(res['rel_diff'], 0.0)
+
+
+def test_edge_centre_artefact_fails():
+    """A volume whose shell differs from its core fails the check."""
+    vol = np.zeros((16, 16, 16), dtype=np.int64)
+    vol[4:-4, 4:-4, 4:-4] = 1
+    assert not edge_centre_consistency(vol, shell=4)['passed']
+
+
+def test_tpb_rejects_non_three_phase():
+    """TPB density raises for labels outside {0, 1, 2}."""
+    with pytest.raises(ValueError):
+        MicrostructureMetrics().triple_phase_boundary_density(
+            np.full((4, 4, 4), 3, dtype=np.int64)
+        )
 
 
 # ---------------------------------------------------------------------------
